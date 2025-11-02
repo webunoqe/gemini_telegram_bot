@@ -1,7 +1,8 @@
 import os
 import logging
+import asyncio
 from telegram import Update
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import google.generativeai as genai
 
 # Настройка логирования
@@ -17,11 +18,11 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
 # Проверка токенов
 if not TELEGRAM_TOKEN:
-    logger.error("❌ TELEGRAM_TOKEN не найден! Проверьте переменные окружения.")
+    logger.error("❌ TELEGRAM_TOKEN не найден!")
     exit(1)
 
 if not GEMINI_API_KEY:
-    logger.error("❌ GEMINI_API_KEY не найден! Проверьте переменные окружения.")
+    logger.error("❌ GEMINI_API_KEY не найден!")
     exit(1)
 
 # Инициализация Gemini
@@ -34,7 +35,7 @@ except Exception as e:
     exit(1)
 
 # Команды бота
-def start(update: Update, context: CallbackContext):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
     welcome_text = """
 🤖 Привет! Я бот с искусственным интеллектом Gemini.
@@ -44,109 +45,71 @@ def start(update: Update, context: CallbackContext):
 Команды:
 /start - это сообщение
 /help - помощь
-/reset - очистить историю
     """
-    update.message.reply_text(welcome_text)
+    await update.message.reply_text(welcome_text)
 
-def help_command(update: Update, context: CallbackContext):
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /help"""
     help_text = """
 📖 Помощь по боту:
 
 • Просто напиши мне сообщение - я отвечу
-• Я помню контекст разговора
-• Используй /reset чтобы очистить историю
 • Работаю на основе Gemini Pro от Google
 
 Начни общение с простого "Привет!" 👍
     """
-    update.message.reply_text(help_text)
+    await update.message.reply_text(help_text)
 
-def reset_chat(update: Update, context: CallbackContext):
-    """Обработчик команды /reset"""
-    context.chat_data.clear()
-    update.message.reply_text("🔄 История диалога очищена! Начнем заново.")
-
-def handle_message(update: Update, context: CallbackContext):
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик текстовых сообщений"""
     user_message = update.message.text
-    user_id = update.message.from_user.id
+    user_id = update.effective_user.id
     
     logger.info(f"📨 Сообщение от {user_id}: {user_message}")
     
     try:
         # Показываем что бот печатает
-        context.bot.send_chat_action(chat_id=update.message.chat_id, action="typing")
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
         
-        # Инициализируем историю если её нет
-        if 'history' not in context.chat_data:
-            context.chat_data['history'] = []
+        # Простой запрос к Gemini (без сложной истории)
+        response = await asyncio.get_event_loop().run_in_executor(
+            None, 
+            lambda: model.generate_content(user_message)
+        )
         
-        # Добавляем сообщение пользователя в историю
-        context.chat_data['history'].append({"role": "user", "parts": user_message})
-        
-        # Создаем чат с историей
-        chat = model.start_chat(history=context.chat_data['history'])
-        
-        # Получаем ответ от Gemini
-        response = chat.send_message(user_message)
-        bot_response = response.text
-        
-        # Добавляем ответ бота в историю
-        context.chat_data['history'].append({"role": "model", "parts": bot_response})
-        
-        # Ограничиваем размер истории (последние 6 сообщений)
-        if len(context.chat_data['history']) > 6:
-            context.chat_data['history'] = context.chat_data['history'][-6:]
-        
-        # Отправляем ответ
-        update.message.reply_text(bot_response)
-        logger.info(f"✅ Ответ отправлен пользователю {user_id}")
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка: {e}", exc_info=True)
-        
-        # Пробуем отправить сообщение без истории
-        try:
-            response = model.generate_content(user_message)
-            if response.text:
-                update.message.reply_text(response.text)
-                logger.info("✅ Ответ отправлен (без истории)")
+        if response.text:
+            # Обрезаем длинные сообщения для Telegram
+            if len(response.text) > 4000:
+                bot_response = response.text[:4000] + "..."
             else:
-                update.message.reply_text("❌ Не удалось получить ответ от AI")
-        except:
-            update.message.reply_text("⚠️ Ошибка соединения. Попробуйте позже или используйте /reset")
-
-def error_handler(update: Update, context: CallbackContext):
-    """Обработчик ошибок"""
-    logger.error(f"🔥 Ошибка бота: {context.error}")
+                bot_response = response.text
+            
+            await update.message.reply_text(bot_response)
+            logger.info(f"✅ Ответ отправлен пользователю {user_id}")
+        else:
+            await update.message.reply_text("❌ Не удалось получить ответ от AI")
+            logger.warning("Пустой ответ от Gemini")
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка: {e}")
+        await update.message.reply_text("⚠️ Временная ошибка. Попробуйте еще раз.")
 
 def main():
     """Основная функция запуска бота"""
     try:
         logger.info("🚀 Запуск бота...")
         
-        # Создаем апдейтер
-        updater = Updater(TELEGRAM_TOKEN, use_context=True)
-        
-        # Получаем диспетчер
-        dp = updater.dispatcher
+        # Создаем Application
+        application = Application.builder().token(TELEGRAM_TOKEN).build()
         
         # Добавляем обработчики
-        dp.add_handler(CommandHandler("start", start))
-        dp.add_handler(CommandHandler("help", help_command))
-        dp.add_handler(CommandHandler("reset", reset_chat))
-        dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
-        
-        # Обработчик ошибок
-        dp.add_error_handler(error_handler)
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
         # Запускаем бота
-        updater.start_polling()
         logger.info("✅ Бот успешно запущен и работает!")
-        
-        # Работаем до остановки
-        updater.idle()
+        application.run_polling()
         
     except Exception as e:
         logger.error(f"💥 Критическая ошибка при запуске: {e}")
