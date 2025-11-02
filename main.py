@@ -1,7 +1,8 @@
 import os
 import logging
+import asyncio
 from telegram import Update
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import google.generativeai as genai
 
 # Настройка логирования
@@ -18,8 +19,11 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 # Проверяем наличие токенов
 if not TELEGRAM_TOKEN:
     logger.error("TELEGRAM_TOKEN не установлен!")
+    raise ValueError("TELEGRAM_TOKEN не найден в переменных окружения")
+
 if not GEMINI_API_KEY:
     logger.error("GEMINI_API_KEY не установлен!")
+    raise ValueError("GEMINI_API_KEY не найден в переменных окружения")
 
 # Настройка Gemini
 try:
@@ -28,9 +32,10 @@ try:
     logger.info("Gemini AI настроен успешно")
 except Exception as e:
     logger.error(f"Ошибка настройки Gemini: {e}")
+    raise
 
 # Команды бота
-def start(update: Update, context: CallbackContext):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик команды /start"""
     welcome_text = """
 🤖 Привет! Я бот с искусственным интеллектом Gemini.
@@ -42,9 +47,9 @@ def start(update: Update, context: CallbackContext):
 /help - помощь
 /reset - очистить историю диалога
     """
-    update.message.reply_text(welcome_text)
+    await update.message.reply_text(welcome_text)
 
-def help_command(update: Update, context: CallbackContext):
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик команды /help"""
     help_text = """
 📖 Помощь по боту:
@@ -56,23 +61,23 @@ def help_command(update: Update, context: CallbackContext):
 
 Если бот не отвечает, попробуйте команду /reset
     """
-    update.message.reply_text(help_text)
+    await update.message.reply_text(help_text)
 
-def reset_chat(update: Update, context: CallbackContext):
+async def reset_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик команды /reset - очищает историю диалога"""
     context.chat_data.clear()
-    update.message.reply_text("🔄 История диалога очищена!")
+    await update.message.reply_text("🔄 История диалога очищена!")
 
-def handle_message(update: Update, context: CallbackContext):
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик текстовых сообщений"""
     user_message = update.message.text
-    chat_id = update.message.chat_id
+    user_id = update.effective_user.id
     
-    logger.info(f"Получено сообщение от {chat_id}: {user_message}")
+    logger.info(f"Получено сообщение от {user_id}: {user_message}")
     
     try:
         # Показываем индикатор набора сообщения
-        context.bot.send_chat_action(chat_id=chat_id, action="typing")
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
         
         # Инициализируем историю диалога если её нет
         if 'chat_history' not in context.chat_data:
@@ -82,7 +87,10 @@ def handle_message(update: Update, context: CallbackContext):
         chat = model.start_chat(history=context.chat_data['chat_history'])
         
         # Получаем ответ от Gemini
-        response = chat.send_message(user_message)
+        response = await asyncio.get_event_loop().run_in_executor(
+            None, 
+            lambda: chat.send_message(user_message)
+        )
         bot_response = response.text
         
         # Обновляем историю диалога
@@ -96,47 +104,40 @@ def handle_message(update: Update, context: CallbackContext):
             context.chat_data['chat_history'] = context.chat_data['chat_history'][-6:]
         
         # Отправляем ответ пользователю
-        update.message.reply_text(bot_response)
-        logger.info(f"Отправлен ответ пользователю {chat_id}")
+        await update.message.reply_text(bot_response)
+        logger.info(f"Отправлен ответ пользователю {user_id}")
         
     except Exception as e:
         logger.error(f"Ошибка при обработке сообщения: {e}")
         error_message = "⚠️ Произошла ошибка при обработке запроса. Попробуйте еще раз или используйте /reset"
-        update.message.reply_text(error_message)
+        await update.message.reply_text(error_message)
 
-def error_handler(update: Update, context: CallbackContext):
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик ошибок"""
     logger.error(f"Ошибка вызвана апдейтом {update}: {context.error}")
 
-def main():
+def main() -> None:
     """Основная функция для запуска бота"""
     try:
-        # Создаем Updater и передаем ему токен бота
-        updater = Updater(TELEGRAM_TOKEN, use_context=True)
+        # Создаем Application
+        application = Application.builder().token(TELEGRAM_TOKEN).build()
         
-        # Получаем диспетчер для регистрации обработчиков
-        dp = updater.dispatcher
-        
-        # Добавляем обработчики команд
-        dp.add_handler(CommandHandler("start", start))
-        dp.add_handler(CommandHandler("help", help_command))
-        dp.add_handler(CommandHandler("reset", reset_chat))
-        
-        # Добавляем обработчик текстовых сообщений
-        dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
+        # Добавляем обработчики
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("reset", reset_chat))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
         # Добавляем обработчик ошибок
-        dp.add_error_handler(error_handler)
+        application.add_error_handler(error_handler)
         
         # Запускаем бота
         logger.info("Бот запускается...")
-        updater.start_polling()
-        
-        # Запускаем бота до тех пор, пока пользователь не остановит его
-        updater.idle()
+        application.run_polling()
         
     except Exception as e:
         logger.error(f"Ошибка при запуске бота: {e}")
+        raise
 
 if __name__ == '__main__':
     main()
