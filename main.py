@@ -12,18 +12,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Конфигурация (получаем из переменных окружения)
+# Конфигурация
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
 # Проверяем наличие токенов
 if not TELEGRAM_TOKEN:
     logger.error("TELEGRAM_TOKEN не установлен!")
-    raise ValueError("TELEGRAM_TOKEN не найден в переменных окружения")
+    raise ValueError("TELEGRAM_TOKEN не найден")
 
 if not GEMINI_API_KEY:
     logger.error("GEMINI_API_KEY не установлен!")
-    raise ValueError("GEMINI_API_KEY не найден в переменных окружения")
+    raise ValueError("GEMINI_API_KEY не найден")
 
 # Настройка Gemini
 try:
@@ -34,8 +34,7 @@ except Exception as e:
     logger.error(f"Ошибка настройки Gemini: {e}")
     raise
 
-# Команды бота
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
     welcome_text = """
 🤖 Привет! Я бот с искусственным интеллектом Gemini.
@@ -49,7 +48,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     await update.message.reply_text(welcome_text)
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /help"""
     help_text = """
 📖 Помощь по боту:
@@ -63,17 +62,15 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """
     await update.message.reply_text(help_text)
 
-async def reset_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def reset_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /reset - очищает историю диалога"""
-    context.chat_data.clear()
+    if 'chat_history' in context.chat_data:
+        context.chat_data['chat_history'] = []
     await update.message.reply_text("🔄 История диалога очищена!")
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик текстовых сообщений"""
     user_message = update.message.text
-    user_id = update.effective_user.id
-    
-    logger.info(f"Получено сообщение от {user_id}: {user_message}")
     
     try:
         # Показываем индикатор набора сообщения
@@ -83,40 +80,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if 'chat_history' not in context.chat_data:
             context.chat_data['chat_history'] = []
         
+        # Добавляем сообщение пользователя в историю
+        context.chat_data['chat_history'].append({"role": "user", "parts": user_message})
+        
         # Создаем чат сессию с историей
         chat = model.start_chat(history=context.chat_data['chat_history'])
         
-        # Получаем ответ от Gemini
+        # Получаем ответ от Gemini (асинхронно)
         response = await asyncio.get_event_loop().run_in_executor(
             None, 
             lambda: chat.send_message(user_message)
         )
         bot_response = response.text
         
-        # Обновляем историю диалога
-        context.chat_data['chat_history'].extend([
-            {"role": "user", "parts": user_message},
-            {"role": "model", "parts": bot_response}
-        ])
+        # Добавляем ответ бота в историю
+        context.chat_data['chat_history'].append({"role": "model", "parts": bot_response})
         
-        # Ограничиваем размер истории чтобы не превышать лимиты
+        # Ограничиваем размер истории
         if len(context.chat_data['chat_history']) > 10:
             context.chat_data['chat_history'] = context.chat_data['chat_history'][-6:]
         
         # Отправляем ответ пользователю
         await update.message.reply_text(bot_response)
-        logger.info(f"Отправлен ответ пользователю {user_id}")
         
     except Exception as e:
-        logger.error(f"Ошибка при обработке сообщения: {e}")
-        error_message = "⚠️ Произошла ошибка при обработке запроса. Попробуйте еще раз или используйте /reset"
+        logger.error(f"Error: {e}")
+        error_message = "⚠️ Произошла ошибка. Попробуйте еще раз или используйте /reset"
         await update.message.reply_text(error_message)
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик ошибок"""
-    logger.error(f"Ошибка вызвана апдейтом {update}: {context.error}")
+    logger.error(f"Update {update} caused error {context.error}")
 
-def main() -> None:
+def main():
     """Основная функция для запуска бота"""
     try:
         # Создаем Application
