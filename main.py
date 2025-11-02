@@ -1,7 +1,7 @@
 import os
 import logging
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 import google.generativeai as genai
 
 # Настройка логирования
@@ -9,16 +9,29 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+logger = logging.getLogger(__name__)
 
-# Конфигурация
+# Конфигурация (получаем из переменных окружения)
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
-# Настройка Gemini
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-pro')
+# Проверяем наличие токенов
+if not TELEGRAM_TOKEN:
+    logger.error("TELEGRAM_TOKEN не установлен!")
+if not GEMINI_API_KEY:
+    logger.error("GEMINI_API_KEY не установлен!")
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Настройка Gemini
+try:
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel('gemini-pro')
+    logger.info("Gemini AI настроен успешно")
+except Exception as e:
+    logger.error(f"Ошибка настройки Gemini: {e}")
+
+# Команды бота
+def start(update: Update, context: CallbackContext):
+    """Обработчик команды /start"""
     welcome_text = """
 🤖 Привет! Я бот с искусственным интеллектом Gemini.
 
@@ -29,9 +42,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /help - помощь
 /reset - очистить историю диалога
     """
-    await update.message.reply_text(welcome_text)
+    update.message.reply_text(welcome_text)
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def help_command(update: Update, context: CallbackContext):
+    """Обработчик команды /help"""
     help_text = """
 📖 Помощь по боту:
 
@@ -42,49 +56,87 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 Если бот не отвечает, попробуйте команду /reset
     """
-    await update.message.reply_text(help_text)
+    update.message.reply_text(help_text)
 
-async def reset_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if 'chat_history' in context.chat_data:
-        context.chat_data['chat_history'] = []
-    await update.message.reply_text("🔄 История диалога очищена!")
+def reset_chat(update: Update, context: CallbackContext):
+    """Обработчик команды /reset - очищает историю диалога"""
+    context.chat_data.clear()
+    update.message.reply_text("🔄 История диалога очищена!")
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def handle_message(update: Update, context: CallbackContext):
+    """Обработчик текстовых сообщений"""
     user_message = update.message.text
+    chat_id = update.message.chat_id
+    
+    logger.info(f"Получено сообщение от {chat_id}: {user_message}")
     
     try:
-        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+        # Показываем индикатор набора сообщения
+        context.bot.send_chat_action(chat_id=chat_id, action="typing")
         
+        # Инициализируем историю диалога если её нет
         if 'chat_history' not in context.chat_data:
             context.chat_data['chat_history'] = []
         
-        context.chat_data['chat_history'].append({"role": "user", "parts": user_message})
-        
+        # Создаем чат сессию с историей
         chat = model.start_chat(history=context.chat_data['chat_history'])
+        
+        # Получаем ответ от Gemini
         response = chat.send_message(user_message)
         bot_response = response.text
         
-        context.chat_data['chat_history'].append({"role": "model", "parts": bot_response})
+        # Обновляем историю диалога
+        context.chat_data['chat_history'].extend([
+            {"role": "user", "parts": user_message},
+            {"role": "model", "parts": bot_response}
+        ])
         
+        # Ограничиваем размер истории чтобы не превышать лимиты
         if len(context.chat_data['chat_history']) > 10:
             context.chat_data['chat_history'] = context.chat_data['chat_history'][-6:]
         
-        await update.message.reply_text(bot_response)
+        # Отправляем ответ пользователю
+        update.message.reply_text(bot_response)
+        logger.info(f"Отправлен ответ пользователю {chat_id}")
         
     except Exception as e:
-        error_message = "⚠️ Произошла ошибка. Попробуйте еще раз или используйте /reset"
-        await update.message.reply_text(error_message)
+        logger.error(f"Ошибка при обработке сообщения: {e}")
+        error_message = "⚠️ Произошла ошибка при обработке запроса. Попробуйте еще раз или используйте /reset"
+        update.message.reply_text(error_message)
+
+def error_handler(update: Update, context: CallbackContext):
+    """Обработчик ошибок"""
+    logger.error(f"Ошибка вызвана апдейтом {update}: {context.error}")
 
 def main():
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-    
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("reset", reset_chat))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    print("Бот запущен...")
-    application.run_polling()
+    """Основная функция для запуска бота"""
+    try:
+        # Создаем Updater и передаем ему токен бота
+        updater = Updater(TELEGRAM_TOKEN, use_context=True)
+        
+        # Получаем диспетчер для регистрации обработчиков
+        dp = updater.dispatcher
+        
+        # Добавляем обработчики команд
+        dp.add_handler(CommandHandler("start", start))
+        dp.add_handler(CommandHandler("help", help_command))
+        dp.add_handler(CommandHandler("reset", reset_chat))
+        
+        # Добавляем обработчик текстовых сообщений
+        dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
+        
+        # Добавляем обработчик ошибок
+        dp.add_error_handler(error_handler)
+        
+        # Запускаем бота
+        logger.info("Бот запускается...")
+        updater.start_polling()
+        
+        # Запускаем бота до тех пор, пока пользователь не остановит его
+        updater.idle()
+        
+    except Exception as e:
+        logger.error(f"Ошибка при запуске бота: {e}")
 
 if __name__ == '__main__':
     main()
